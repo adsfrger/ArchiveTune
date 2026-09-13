@@ -1,21 +1,50 @@
-name: Build Clone ArchiveTune
+name: Auto Sync and Build Clone
 
 on:
-  # フォーク元から「Sync fork」した時（mainブランチへのプッシュ）に自動実行
-  push:
-    branches: [ "main", "master" ]
-  # 手動で実行するためのトリガー
-  workflow_dispatch:
+  schedule:
+    # 毎日日本時間の午前9時(UTCの0時)に本家の更新がないかチェック
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 手動実行用
+
+permissions:
+  contents: write # リポジトリの自動同期（Sync）に必要
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Sync fork with upstream
+      id: sync
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        BEFORE=$(git rev-parse HEAD)
+        
+        # GitHub CLIを使用して本家リポジトリの変更をフォークに同期する
+        gh repo sync ${{ github.repository }}
+        
+        # 同期された最新の状態を手元の環境（Actions内）に反映する
+        git pull
+        
+        AFTER=$(git rev-parse HEAD)
+        
+        # 更新があったかどうかを判定
+        if [ "$BEFORE" != "$AFTER" ]; then
+          echo "Update found! Proceeding with build."
+          echo "updated=true" >> $GITHUB_OUTPUT
+        else
+          echo "No updates found. Skipping build."
+          echo "updated=false" >> $GITHUB_OUTPUT
+        fi
 
     - name: Set up JDK 17
+      # 手動実行時、またはアップデートがあった場合のみ後続を実行
+      if: steps.sync.outputs.updated == 'true' || github.event_name == 'workflow_dispatch'
       uses: actions/setup-java@v4
       with:
         java-version: '17'
@@ -23,25 +52,24 @@ jobs:
         cache: gradle
 
     - name: Rewrite applicationId and App Name
+      if: steps.sync.outputs.updated == 'true' || github.event_name == 'workflow_dispatch'
       run: |
-        # 1. build.gradle(.kts) 内の applicationId を検索して末尾に ".clone" を追加する
-        # ※記述形式（Kotlin DSLかGroovyか）に合わせて両方対応
-        find . -name "build.gradle*" -exec sed -i 's/applicationId = "/applicationId = "/g' {} +
-        find . -name "build.gradle*" -exec sed -i 's/applicationId "/applicationId "/g' {} +
-        
-        # 具体的なパッケージ名がわかる場合は直接置換が確実です（例）
+        # パッケージ名の書き換え
         find . -name "build.gradle*" -exec sed -i 's/io.github.rukamori.archivetune/io.github.rukamori.archivetune.clone/g' {} +
-
-        # 2. アプリ名を変更して、本家と見分けがつくようにする
+        
+        # アプリ名の書き換え
         find . -name "strings.xml" -exec sed -i 's/>ArchiveTune</>ArchiveTune Clone</g' {} +
 
     - name: Make gradlew executable
+      if: steps.sync.outputs.updated == 'true' || github.event_name == 'workflow_dispatch'
       run: chmod +x ./gradlew
 
     - name: Build Debug APK
+      if: steps.sync.outputs.updated == 'true' || github.event_name == 'workflow_dispatch'
       run: ./gradlew assembleDebug
 
     - name: Upload APK
+      if: steps.sync.outputs.updated == 'true' || github.event_name == 'workflow_dispatch'
       uses: actions/upload-artifact@v4
       with:
         name: ArchiveTune-Clone-APK
